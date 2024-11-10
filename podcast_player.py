@@ -76,10 +76,10 @@ class EpisodeDetailScreen(Screen):
         yield Static(f"Description: {self.episode.description}")
         yield Button("Back to Podcast", id="back_button")
 
-    async def on_button_pressed(self, event) -> None:
+    def on_button_pressed(self, event) -> None:
         """Handle button press events in the episode detail screen."""
         if event.button.id == "back_button":
-            await self.app.pop_screen()  # Go back to the podcast list
+            self.app.pop_screen()  # Go back to the podcast list (synchronous)
 
 class PodcastPlayer(App):
     """A TUI Podcast Player using Textual with iTunes API integration."""
@@ -142,6 +142,12 @@ class PodcastPlayer(App):
             item = ListItem(Static(episode_info))  # Use Static to display episode info
             item.metadata = episode  # Store episode data in metadata for later access
             episode_list_view.append(item)
+
+    async def on_pop_screen(self, screen: Screen) -> None:
+        """Handle returning to the main screen after episode detail view."""
+        if isinstance(screen, EpisodeDetailScreen):
+            # Re-initialize event handlers and refresh the podcast list after returning
+            self.update_podcast_list()
 
 # Run the application
 if __name__ == "__main__":
