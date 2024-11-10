@@ -1,8 +1,10 @@
+from datetime import timedelta
 import requests
 import feedparser
+from textual import events
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Header, Footer, Static, Input, Button, ListView, ListItem
+from textual.widgets import Button, Header, Footer, Static, Input, Button, ListView, ListItem, ProgressBar
 from textual.events import Key
 from textual.widget import Widget
 from textual.reactive import Reactive
@@ -63,23 +65,88 @@ def search_podcasts(term):
     return podcasts
 
 class EpisodeDetailScreen(Screen):
-    """Screen to display episode details in a modal-like manner."""
+    """Screen to display episode details and allow playback controls."""
 
     def __init__(self, episode):
         super().__init__()
         self.episode = episode
+        self.is_playing = False
+        self.current_time = 0  # Start at the beginning of the episode
 
     def compose(self) -> ComposeResult:
         """Compose the elements of the screen."""
+        # Episode title, duration, and description
         yield Static(f"Title: {self.episode.title}")
         yield Static(f"Duration: {self.episode.duration}")
         yield Static(f"Description: {self.episode.description}")
+
+        # Add Play Episode button
+        yield Button("Play Episode", id="play_button")
+
+        # Add Back to Podcast button
         yield Button("Back to Podcast", id="back_button")
+
+        # Progress bar to show current progress
+        progress_bar = ProgressBar(total=100, id="progress_bar", show_percentage=True)
+        yield progress_bar
+
+        # Timestamp display (Current Position)
+        yield Static(f"Current Position: {self.format_time(self.current_time)}", id="timestamp")
+
+        # Play/Pause button
+        yield Button("Play/Pause", id="play_pause_button")
 
     def on_button_pressed(self, event) -> None:
         """Handle button press events in the episode detail screen."""
-        if event.button.id == "back_button":
-            self.app.pop_screen()  # Go back to the podcast list (synchronous)
+        if event.button.id == "play_button":
+            self.start_playing()
+        elif event.button.id == "play_pause_button":
+            self.toggle_play_pause()
+        elif event.button.id == "back_button":
+            self.app.pop_screen()  # Go back to the podcast list screen
+
+    def start_playing(self) -> None:
+        """Start playing the episode."""
+        self.is_playing = True
+        self.update_progress_bar()
+
+    def toggle_play_pause(self) -> None:
+        """Toggle between playing and paused states."""
+        if self.is_playing:
+            self.is_playing = False
+        else:
+            self.is_playing = True
+            self.update_progress_bar()
+
+    def update_progress_bar(self) -> None:
+        """Update the progress bar to reflect the current progress."""
+        if self.is_playing:
+            # Simulate episode playing by incrementing current_time
+            # We'll update the progress bar here and display the current timestamp
+            if self.current_time < self.episode.duration:
+                self.current_time += 1
+                self.update_ui()
+            else:
+                self.is_playing = False  # Stop when the episode finishes
+        self.call_later(1, self.update_progress_bar)  # Update every 1 second
+
+    def update_ui(self) -> None:
+        """Update the UI elements to reflect current time and progress."""
+        progress_bar = self.query_one("#progress_bar")
+        progress_bar.value = (self.current_time / self.episode.duration) * 100
+        self.query_one("#timestamp").update(f"Current Position: {self.format_time(self.current_time)}")
+
+    def format_time(self, seconds: int) -> str:
+        """Convert seconds to a readable timestamp format."""
+        return str(timedelta(seconds=seconds))
+
+    def on_progress_bar_clicked(self, event: events.Click) -> None:
+        """Handle progress bar click to seek within the episode."""
+        # Calculate the clicked position as a percentage of the total duration
+        progress_bar = self.query_one("#progress_bar")
+        clicked_position = event.x / progress_bar.size.width
+        self.current_time = int(clicked_position * self.episode.duration)
+        self.update_ui()  # Update the UI to reflect the new position
 
 class PodcastPlayer(App):
     """A TUI Podcast Player using Textual with iTunes API integration."""
