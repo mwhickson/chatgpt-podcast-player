@@ -1,3 +1,4 @@
 feedparser
+pygame
 requests
 textual

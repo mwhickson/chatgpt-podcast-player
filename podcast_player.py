@@ -1,4 +1,5 @@
 from datetime import timedelta
+import pygame
 import requests
 import feedparser
 from textual import events
@@ -9,15 +10,23 @@ from textual.events import Key
 from textual.widget import Widget
 from textual.reactive import Reactive
 from textual.screen import Screen
+from pygame import mixer
+import time
+import os
+import tempfile
+import concurrent.futures
 
+# Episode class with audio_url
 class Episode:
-    """Class to represent a podcast episode."""
-    
-    def __init__(self, title, url, description, duration):
+    def __init__(self, title, description, duration, audio_url):
         self.title = title
-        self.url = url
         self.description = description
-        self.duration = duration
+        # Make sure the duration is a valid number (if not, set to 0.0 or some default value)
+        try:
+            self.duration = float(duration) if duration and duration != "Unknown" else 0.0
+        except ValueError:
+            self.duration = 0.0  # Default to 0.0 if invalid
+        self.audio_url = audio_url
 
 class Podcast:
     """Class to represent a podcast."""
@@ -34,9 +43,9 @@ class Podcast:
         self.episodes = [
             Episode(
                 entry.title,
-                entry.enclosures[0].href if entry.enclosures else None,
                 entry.summary,
-                entry.itunes_duration if "itunes_duration" in entry else "Unknown"
+                entry.itunes_duration if "itunes_duration" in entry else "Unknown",
+                entry.enclosures[0].href if entry.enclosures else None
             )
             for entry in feed.entries
         ]
@@ -71,7 +80,12 @@ class EpisodeDetailScreen(Screen):
         super().__init__()
         self.episode = episode
         self.is_playing = False
+        self.is_paused = False
         self.current_time = 0  # Start at the beginning of the episode
+        self.audio = None  # Placeholder for the audio file
+
+        # Initialize pygame mixer for audio playback
+        pygame.mixer.init()
 
     def compose(self) -> ComposeResult:
         """Compose the elements of the screen."""
@@ -87,11 +101,11 @@ class EpisodeDetailScreen(Screen):
         yield Button("Back to Podcast", id="back_button")
 
         # Progress bar to show current progress
-        progress_bar = ProgressBar(total=100, id="progress_bar", show_percentage=True)
-        yield progress_bar
+        #progress_bar = ProgressBar(total=100, id="progress_bar", show_percentage=True)
+        #yield progress_bar
 
         # Timestamp display (Current Position)
-        yield Static(f"Current Position: {self.format_time(self.current_time)}", id="timestamp")
+        #yield Static(f"Current Position: {self.format_time(self.current_time)}", id="timestamp")
 
         # Play/Pause button
         yield Button("Play/Pause", id="play_pause_button")
@@ -105,48 +119,105 @@ class EpisodeDetailScreen(Screen):
         elif event.button.id == "back_button":
             self.app.pop_screen()  # Go back to the podcast list screen
 
-    def start_playing(self) -> None:
-        """Start playing the episode."""
-        self.is_playing = True
-        self.update_progress_bar()
-
     def toggle_play_pause(self) -> None:
         """Toggle between playing and paused states."""
         if self.is_playing:
+            pygame.mixer.music.pause()  # Pause the music
             self.is_playing = False
-        else:
+            self.is_paused = True
+        elif self.is_paused:
+            pygame.mixer.music.unpause()  # Unpause the music
+            self.is_paused = False
             self.is_playing = True
-            self.update_progress_bar()
+            #self.update_progress_bar()
 
-    def update_progress_bar(self) -> None:
-        """Update the progress bar to reflect the current progress."""
-        if self.is_playing:
-            # Simulate episode playing by incrementing current_time
-            # We'll update the progress bar here and display the current timestamp
-            if self.current_time < self.episode.duration:
-                self.current_time += 1
-                self.update_ui()
-            else:
-                self.is_playing = False  # Stop when the episode finishes
-        self.call_later(1, self.update_progress_bar)  # Update every 1 second
+    def load_audio(self) -> None:
+        """Download and load the audio file in a separate thread."""
+        if not self.episode.audio_url:
+            raise ValueError("No audio URL provided for the episode.")
+        
+        # Use ThreadPoolExecutor to download the audio file in the background
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(self.download_audio, self.episode.audio_url)
+            future.add_done_callback(self.on_audio_download_complete)
 
-    def update_ui(self) -> None:
-        """Update the UI elements to reflect current time and progress."""
-        progress_bar = self.query_one("#progress_bar")
-        progress_bar.value = (self.current_time / self.episode.duration) * 100
-        self.query_one("#timestamp").update(f"Current Position: {self.format_time(self.current_time)}")
+    def download_audio(self, url: str):
+        """Download the audio file and save it temporarily."""
+        try:
+            response = requests.get(url, stream=True)
+            response.raise_for_status()  # Check for HTTP errors
+            
+            # Save the audio file to a temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_file:
+                temp_file.write(response.content)
+                temp_file.close()  # Close the file to allow pygame to access it
+                return temp_file.name  # Return the path to the temporary file
+        except requests.RequestException as e:
+            print(f"Error downloading the episode: {e}")
+            return None
 
-    def format_time(self, seconds: int) -> str:
-        """Convert seconds to a readable timestamp format."""
-        return str(timedelta(seconds=seconds))
+    def on_audio_download_complete(self, future):
+        """Handle the completion of the audio download."""
+        audio_file = future.result()  # Get the result from the background thread
+        if audio_file:
+            self.audio = audio_file
+            pygame.mixer.music.load(self.audio)
+            self.start_playing()  # Start playing once the audio is loaded
+        else:
+            print("Failed to download the audio file.")
 
-    def on_progress_bar_clicked(self, event: events.Click) -> None:
-        """Handle progress bar click to seek within the episode."""
-        # Calculate the clicked position as a percentage of the total duration
-        progress_bar = self.query_one("#progress_bar")
-        clicked_position = event.x / progress_bar.size.width
-        self.current_time = int(clicked_position * self.episode.duration)
-        self.update_ui()  # Update the UI to reflect the new position
+    def start_playing(self) -> None:
+        """Start playing the episode."""
+        if not self.audio:
+            self.load_audio()
+        if not self.is_playing:
+            pygame.mixer.music.play(start=self.current_time)  # Start the music from the current time
+            self.is_playing = True
+            #self.update_progress_bar()
+
+##    def update_progress_bar(self) -> None:
+##        """Update the progress bar to reflect the current progress."""
+##        if self.is_playing:
+##            # Get the current position of the audio
+##            self.current_time = pygame.mixer.music.get_pos() / 1000  # Convert ms to seconds
+##            if self.current_time >= self.episode.duration:
+##                self.is_playing = False  # Stop when the episode finishes
+##            self.update_ui()
+##
+##        # Directly call the method in call_later without using partial
+##        #self.call_later(1, self.update_progress_bar)
+##    
+##    def update_ui(self) -> None:
+##        """Update the UI elements to reflect current time and progress."""
+##        progress_bar = self.query_one("#progress_bar")
+##        
+##        if self.episode.duration > 0:  # Prevent division by zero
+##            progress_bar.value = (self.current_time / self.episode.duration) * 100
+##        else:
+##            progress_bar.value = 0  # Set to 0% if the duration is zero
+##
+##        self.query_one("#timestamp").update(f"Current Position: {self.format_time(self.current_time)}")
+##
+##    def format_time(self, seconds: int) -> str:
+##        """Convert seconds to a readable timestamp format."""
+##        return str(timedelta(seconds=seconds))
+##
+##    def on_progress_bar_clicked(self, event: events.Click) -> None:
+##        """Handle progress bar click to seek within the episode."""
+##        # Calculate the clicked position as a percentage of the total duration
+##        progress_bar = self.query_one("#progress_bar")
+##        clicked_position = event.x / progress_bar.size.width
+##        self.current_time = int(clicked_position * self.episode.duration)
+##        pygame.mixer.music.play(start=self.current_time)  # Start playback from the clicked position
+##        self.update_ui()  # Update the UI to reflect the new position
+##
+##    def on_music_finished(self):
+##        """Callback when music finishes playing."""
+##        self.is_playing = False
+##        pygame.mixer.music.stop()
+##        if self.audio:
+##            os.remove(self.audio)  # Delete the temporary audio file when done
+##            self.audio = None
 
 class PodcastPlayer(App):
     """A TUI Podcast Player using Textual with iTunes API integration."""
@@ -205,9 +276,8 @@ class PodcastPlayer(App):
         episode_list_view = self.query_one("#episode_list")
         episode_list_view.clear()
         for episode in episodes:
-            episode_info = f"{episode.title} - {episode.duration}"
-            item = ListItem(Static(episode_info))  # Use Static to display episode info
-            item.metadata = episode  # Store episode data in metadata for later access
+            item = ListItem(Static(episode.title))  # Display episode title
+            item.metadata = episode  # Store episode data in metadata
             episode_list_view.append(item)
 
     async def on_pop_screen(self, screen: Screen) -> None:
